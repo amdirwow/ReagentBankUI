@@ -617,18 +617,52 @@ local function createBorderedPanel(parent, inset)
 end
 
 local function setTabVisual(tab, isActive, isHover)
+    if tab.StateFill then
+        if isActive then
+            tab.StateFill:SetVertexColor(0.16, 0.05, 0.03, 0.98)
+        elseif isHover then
+            tab.StateFill:SetVertexColor(0.14, 0.06, 0.03, 0.98)
+        else
+            tab.StateFill:SetVertexColor(0.10, 0.04, 0.03, 0.96)
+        end
+        tab.StateFill:Show()
+    end
+
+    if tab.IconHolder then
+        if isActive then
+            tab.IconHolder:SetBackdropColor(0.93, 0.88, 0.62, 0.98)
+            tab.IconHolder:SetBackdropBorderColor(1.00, 0.96, 0.78, 1.00)
+        elseif isHover then
+            tab.IconHolder:SetBackdropColor(0.30, 0.10, 0.08, 0.98)
+            tab.IconHolder:SetBackdropBorderColor(0.88, 0.52, 0.18, 0.95)
+        else
+            tab.IconHolder:SetBackdropColor(0.16, 0.04, 0.05, 0.96)
+            tab.IconHolder:SetBackdropBorderColor(0.36, 0.10, 0.10, 0.92)
+        end
+        tab.IconHolder:Show()
+    end
+
     if isActive then
-        tab:SetBackdropColor(0.42, 0.18, 0.04, 0.98)
-        tab:SetBackdropBorderColor(1.00, 0.82, 0.18, 1.00)
+        tab:SetBackdropColor(0.18, 0.10, 0.04, 0.98)
+        tab:SetBackdropBorderColor(1.00, 0.92, 0.58, 1.00)
         tab.icon:SetVertexColor(1.0, 1.0, 1.0)
+        if tab.ActiveGlow then
+            tab.ActiveGlow:Show()
+        end
     elseif isHover then
-        tab:SetBackdropColor(0.22, 0.10, 0.03, 0.98)
-        tab:SetBackdropBorderColor(0.95, 0.78, 0.16, 1.00)
+        tab:SetBackdropColor(0.14, 0.07, 0.03, 0.98)
+        tab:SetBackdropBorderColor(0.92, 0.62, 0.24, 1.00)
         tab.icon:SetVertexColor(1.0, 1.0, 1.0)
+        if tab.ActiveGlow then
+            tab.ActiveGlow:Hide()
+        end
     else
-        tab:SetBackdropColor(0.10, 0.07, 0.04, 0.96)
-        tab:SetBackdropBorderColor(0.58, 0.46, 0.13, 0.88)
-        tab.icon:SetVertexColor(0.92, 0.92, 0.92)
+        tab:SetBackdropColor(0.08, 0.04, 0.03, 0.96)
+        tab:SetBackdropBorderColor(0.40, 0.16, 0.10, 0.90)
+        tab.icon:SetVertexColor(0.95, 0.95, 0.95)
+        if tab.ActiveGlow then
+            tab.ActiveGlow:Hide()
+        end
     end
 end
 
@@ -1546,6 +1580,18 @@ function RB:ApplyCategoryTabLayout(orderOverride, placeholderCategoryId)
                 tab.icon:SetTexture(nil)
                 tab:SetBackdropColor(0.06, 0.06, 0.06, 0.35)
                 tab:SetBackdropBorderColor(1.00, 0.82, 0.18, 0.95)
+                if tab.StateFill then
+                    tab.StateFill:SetVertexColor(0.06, 0.06, 0.06, 0.35)
+                    tab.StateFill:Show()
+                end
+                if tab.IconHolder then
+                    tab.IconHolder:SetBackdropColor(0.06, 0.06, 0.06, 0.25)
+                    tab.IconHolder:SetBackdropBorderColor(0.85, 0.72, 0.20, 0.85)
+                    tab.IconHolder:Show()
+                end
+                if tab.ActiveGlow then
+                    tab.ActiveGlow:Hide()
+                end
                 tab:Show()
             else
                 local category = getCategoryById(categoryId)
@@ -1570,6 +1616,9 @@ function RB:ApplyCategoryTabLayout(orderOverride, placeholderCategoryId)
         tab.isPlaceholder = false
         tab.icon:SetTexture(nil)
         tab:SetAlpha(1)
+        if tab.ActiveGlow then
+            tab.ActiveGlow:Hide()
+        end
         tab:Hide()
     end
 end
@@ -1729,18 +1778,48 @@ function RB:CreateTabs(parent)
         local tab = CreateFrame("Button", nil, parent.sidePanelInner)
         tab:SetSize(getCategoryButtonWidth(), getCategoryButtonHeight())
         tab:SetBackdrop({
-            bgFile = "Interface\Buttons\WHITE8X8",
-            edgeFile = "Interface\Tooltips\UI-Tooltip-Border",
+            bgFile = "Interface\\Buttons\\WHITE8X8",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
             tile = false,
             edgeSize = 12,
             insets = { left = 2, right = 2, top = 2, bottom = 2 },
         })
         tab:RegisterForDrag("LeftButton")
 
-        local icon = tab:CreateTexture(nil, "ARTWORK")
+        local stateFill = tab:CreateTexture(nil, "BACKGROUND")
+        stateFill:SetTexture("Interface\\Buttons\\WHITE8X8")
+        stateFill:SetPoint("TOPLEFT", tab, "TOPLEFT", 2, -2)
+        stateFill:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", -2, 2)
+        stateFill:SetVertexColor(0.10, 0.04, 0.03, 0.96)
+        tab.StateFill = stateFill
+
+        local iconHolder = CreateFrame("Frame", nil, tab)
+        iconHolder:SetSize(self.CATEGORY_ICON_SIZE + 8, self.CATEGORY_ICON_SIZE + 8)
+        iconHolder:SetPoint("CENTER", 0, 0)
+        iconHolder:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8X8",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = false,
+            edgeSize = 10,
+            insets = { left = 2, right = 2, top = 2, bottom = 2 },
+        })
+        iconHolder:SetBackdropColor(0.16, 0.04, 0.05, 0.96)
+        iconHolder:SetBackdropBorderColor(0.36, 0.10, 0.10, 0.92)
+        tab.IconHolder = iconHolder
+
+        local icon = iconHolder:CreateTexture(nil, "ARTWORK")
         icon:SetSize(self.CATEGORY_ICON_SIZE, self.CATEGORY_ICON_SIZE)
         icon:SetPoint("CENTER", 0, 0)
         tab.icon = icon
+
+        local activeGlow = tab:CreateTexture(nil, "OVERLAY")
+        activeGlow:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+        activeGlow:SetBlendMode("ADD")
+        activeGlow:SetAlpha(0.95)
+        activeGlow:SetPoint("TOPLEFT", iconHolder, "TOPLEFT", -10, 10)
+        activeGlow:SetPoint("BOTTOMRIGHT", iconHolder, "BOTTOMRIGHT", 10, -10)
+        activeGlow:Hide()
+        tab.ActiveGlow = activeGlow
 
         tab.categoryId = nil
         tab.categoryName = nil
