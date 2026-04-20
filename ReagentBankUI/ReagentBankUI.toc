@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: ReagentBankUI
+## Notes: Custom reagent bank UI styled after the guild bank for WoW 3.3.5a
+## Author: OpenAI
+## Version: 0.1.0
+## SavedVariables: ReagentBankUI_DB
+
+ReagentBankUI.lua
