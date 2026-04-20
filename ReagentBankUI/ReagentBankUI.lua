@@ -56,6 +56,9 @@ RB.state = {
 
 RB.DEBUG = false
 
+RB.dragState = nil
+RB.dragVisual = nil
+
 
 local function wipeTable(tbl)
     if not tbl then
@@ -142,6 +145,430 @@ local function ensurePageBucket(categoryId)
         }
     end
     return RB.state.pageCache[categoryId]
+end
+
+local function getLayoutKey(categoryId, page)
+    return tostring(categoryId) .. ":" .. tostring(page or 1)
+end
+
+function RB:EnsureDatabase()
+    if not ReagentBankUI_DB then
+        ReagentBankUI_DB = {}
+    end
+
+    ReagentBankUI_DB.layout = ReagentBankUI_DB.layout or {}
+    ReagentBankUI_DB.categoryOrder = ReagentBankUI_DB.categoryOrder or {}
+end
+
+function RB:GetLayoutBucket(categoryId, page)
+    self:EnsureDatabase()
+
+    local key = getLayoutKey(categoryId, page)
+    if not ReagentBankUI_DB.layout[key] then
+        ReagentBankUI_DB.layout[key] = {}
+    end
+
+    return ReagentBankUI_DB.layout[key]
+end
+
+function RB:ClearMissingLayoutEntries(categoryId, page, rawItems)
+    if self.state.isSearchMode or not categoryId or categoryId <= 0 then
+        return
+    end
+
+    if not rawItems or #rawItems == 0 then
+        return
+    end
+
+    local bucket = self:GetLayoutBucket(categoryId, page)
+    local present = {}
+
+    for _, item in ipairs(rawItems or {}) do
+        if item and item.itemID then
+            present[item.itemID] = true
+        end
+    end
+
+    for slotIndex, itemID in pairs(bucket) do
+        if not present[itemID] then
+            bucket[slotIndex] = nil
+        end
+    end
+end
+
+function RB:SaveDisplayedLayout(categoryId, page, displayedItems)
+    if self.state.isSearchMode or not categoryId or categoryId <= 0 then
+        return
+    end
+
+    local bucket = self:GetLayoutBucket(categoryId, page)
+    wipeTable(bucket)
+
+    for slotIndex = 1, self.PAGE_SIZE do
+        local item = displayedItems[slotIndex]
+        if item and item.itemID then
+            bucket[slotIndex] = item.itemID
+        end
+    end
+end
+
+function RB:SyncLayoutWithRawItems(categoryId, page, rawItems)
+    if self.state.isSearchMode or not categoryId or categoryId <= 0 then
+        return
+    end
+
+    if not rawItems or #rawItems == 0 then
+        return
+    end
+
+    self:ClearMissingLayoutEntries(categoryId, page, rawItems)
+
+    local bucket = self:GetLayoutBucket(categoryId, page)
+    local used = {}
+
+    for slotIndex = 1, self.PAGE_SIZE do
+        local itemID = bucket[slotIndex]
+        if itemID then
+            used[itemID] = true
+        end
+    end
+
+    local nextFreeSlot = 1
+    for _, item in ipairs(rawItems) do
+        if item and item.itemID and not used[item.itemID] then
+            while nextFreeSlot <= self.PAGE_SIZE and bucket[nextFreeSlot] do
+                nextFreeSlot = nextFreeSlot + 1
+            end
+
+            if nextFreeSlot > self.PAGE_SIZE then
+                break
+            end
+
+            bucket[nextFreeSlot] = item.itemID
+            used[item.itemID] = true
+            nextFreeSlot = nextFreeSlot + 1
+        end
+    end
+
+    self:Debug("SyncLayoutWithRawItems: category=" .. tostring(categoryId) .. ", page=" .. tostring(page) .. ", entries=" .. tostring(#rawItems), true)
+end
+
+function RB:GetDisplayedItems()
+    local rawItems = self:GetCurrentItems()
+    if self.state.isSearchMode or not self.state.currentCategory or self.state.currentCategory <= 0 then
+        return rawItems
+    end
+
+    local categoryId = self.state.currentCategory
+    local page = self.state.currentPage or 1
+    local bucket = self:GetLayoutBucket(categoryId, page)
+    local arranged = {}
+    local used = {}
+    local byItemID = {}
+
+    for _, item in ipairs(rawItems) do
+        if item and item.itemID then
+            byItemID[item.itemID] = shallowItemCopy(item)
+        end
+    end
+
+    for slotIndex = 1, self.PAGE_SIZE do
+        local itemID = bucket[slotIndex]
+        if itemID and byItemID[itemID] and not used[itemID] then
+            arranged[slotIndex] = shallowItemCopy(byItemID[itemID])
+            used[itemID] = true
+        end
+    end
+
+    local nextFreeSlot = 1
+    for _, item in ipairs(rawItems) do
+        if item and item.itemID and not used[item.itemID] then
+            while nextFreeSlot <= self.PAGE_SIZE and arranged[nextFreeSlot] do
+                nextFreeSlot = nextFreeSlot + 1
+            end
+
+            if nextFreeSlot > self.PAGE_SIZE then
+                break
+            end
+
+            arranged[nextFreeSlot] = shallowItemCopy(item)
+            nextFreeSlot = nextFreeSlot + 1
+        end
+    end
+
+    return arranged
+end
+
+function RB:MoveDisplayedItem(sourceSlotIndex, targetSlotIndex)
+    if self.state.isSearchMode or not sourceSlotIndex or not targetSlotIndex or sourceSlotIndex == targetSlotIndex then
+        self:Debug("MoveDisplayedItem skipped: source=" .. tostring(sourceSlotIndex) .. ", target=" .. tostring(targetSlotIndex), true)
+        return
+    end
+
+    local categoryId = self.state.currentCategory
+    local page = self.state.currentPage or 1
+    local displayedItems = self:GetDisplayedItems()
+    local sourceItem = displayedItems[sourceSlotIndex]
+    if not sourceItem then
+        self:Debug("MoveDisplayedItem skipped: no source item at slot " .. tostring(sourceSlotIndex), true)
+        return
+    end
+
+    local targetItem = displayedItems[targetSlotIndex]
+    displayedItems[sourceSlotIndex] = targetItem and shallowItemCopy(targetItem) or nil
+    displayedItems[targetSlotIndex] = shallowItemCopy(sourceItem)
+
+    self:SaveDisplayedLayout(categoryId, page, displayedItems)
+
+    self:Debug(
+        "MoveDisplayedItem saved: category=" .. tostring(categoryId)
+        .. ", page=" .. tostring(page)
+        .. ", sourceSlot=" .. tostring(sourceSlotIndex)
+        .. ", targetSlot=" .. tostring(targetSlotIndex)
+        .. ", sourceItemID=" .. tostring(sourceItem.itemID)
+        .. ", targetItemID=" .. tostring(targetItem and targetItem.itemID or nil),
+        true
+    )
+
+    self:Render()
+end
+
+function RB:NormalizeCategoryOrder()
+    self:EnsureDatabase()
+
+    local normalized = {}
+    local seen = {}
+
+    for _, categoryId in ipairs(ReagentBankUI_DB.categoryOrder) do
+        local category = getCategoryById(categoryId)
+        if category and category.id == categoryId and not seen[categoryId] then
+            table.insert(normalized, categoryId)
+            seen[categoryId] = true
+        end
+    end
+
+    for _, category in ipairs(self.categories) do
+        if not seen[category.id] then
+            table.insert(normalized, category.id)
+            seen[category.id] = true
+        end
+    end
+
+    ReagentBankUI_DB.categoryOrder = normalized
+    return normalized
+end
+
+function RB:GetOrderedCategories()
+    local ordered = {}
+    local order = self:NormalizeCategoryOrder()
+
+    for _, categoryId in ipairs(order) do
+        table.insert(ordered, getCategoryById(categoryId))
+    end
+
+    return ordered
+end
+
+function RB:MoveCategory(draggedCategoryId, targetCategoryId, insertAfter)
+    if not draggedCategoryId or not targetCategoryId or draggedCategoryId == targetCategoryId then
+        return
+    end
+
+    local order = self:NormalizeCategoryOrder()
+    local draggedIndex, targetIndex
+
+    for index, categoryId in ipairs(order) do
+        if categoryId == draggedCategoryId then
+            draggedIndex = index
+        end
+        if categoryId == targetCategoryId then
+            targetIndex = index
+        end
+    end
+
+    if not draggedIndex or not targetIndex then
+        return
+    end
+
+    table.remove(order, draggedIndex)
+    if draggedIndex < targetIndex then
+        targetIndex = targetIndex - 1
+    end
+
+    if insertAfter then
+        targetIndex = targetIndex + 1
+    end
+
+    if targetIndex < 1 then
+        targetIndex = 1
+    end
+    if targetIndex > (#order + 1) then
+        targetIndex = #order + 1
+    end
+
+    table.insert(order, targetIndex, draggedCategoryId)
+    ReagentBankUI_DB.categoryOrder = order
+
+    self:ApplyCategoryTabLayout()
+    self:Render()
+end
+
+function RB:BuildCategoryPreviewOrderByIndex(draggedCategoryId, insertIndex)
+    local order = self:NormalizeCategoryOrder()
+    local preview = {}
+
+    for _, categoryId in ipairs(order) do
+        if categoryId ~= draggedCategoryId then
+            table.insert(preview, categoryId)
+        end
+    end
+
+    if insertIndex < 1 then
+        insertIndex = 1
+    end
+    if insertIndex > (#preview + 1) then
+        insertIndex = #preview + 1
+    end
+
+    table.insert(preview, insertIndex, draggedCategoryId)
+    return preview
+end
+
+local function clamp(value, minValue, maxValue)
+    if value < minValue then
+        return minValue
+    end
+    if value > maxValue then
+        return maxValue
+    end
+    return value
+end
+
+function RB:GetCategoryInsertIndexFromCursor()
+    if not self.frame or not self.frame.sidePanelInner then
+        return 1
+    end
+
+    local order = self:NormalizeCategoryOrder()
+    local total = #order
+    if total < 1 then
+        return 1
+    end
+
+    local _, cursorY = GetCursorPosition()
+    local scale = UIParent:GetEffectiveScale() or 1
+    cursorY = cursorY / scale
+
+    local top = self.frame.sidePanelInner:GetTop() or 0
+    local bottom = self.frame.sidePanelInner:GetBottom() or 0
+    local buttonHeight = self.CATEGORY_ICON_SIZE + self.CATEGORY_BUTTON_PADDING_Y * 2
+    local step = buttonHeight + self.TAB_GAP
+
+    local minY = bottom + buttonHeight / 2
+    local maxY = top - buttonHeight / 2
+    cursorY = clamp(cursorY, minY, maxY)
+
+    local insertIndex = math.floor(((top - cursorY) / step) + 0.5) + 1
+    insertIndex = clamp(insertIndex, 1, total)
+
+    return insertIndex, cursorY
+end
+
+function RB:GetCategoryDragVisualPosition()
+    if not self.frame or not self.frame.sidePanelInner then
+        return nil, nil, nil
+    end
+
+    local insertIndex, clampedY = self:GetCategoryInsertIndexFromCursor()
+    local left = self.frame.sidePanelInner:GetLeft() or 0
+    local right = self.frame.sidePanelInner:GetRight() or left
+    local centerX = (left + right) / 2
+
+    return centerX, clampedY, insertIndex
+end
+
+function RB:UpdateCategoryDragPreview()
+    local dragState = self.dragState
+    if not dragState or dragState.kind ~= "category" then
+        return
+    end
+
+    local insertIndex = self:GetCategoryInsertIndexFromCursor()
+    if not insertIndex then
+        return
+    end
+
+    if dragState.previewInsertIndex ~= insertIndex then
+        dragState.previewInsertIndex = insertIndex
+        dragState.previewOrder = self:BuildCategoryPreviewOrderByIndex(dragState.categoryId, insertIndex)
+        self:ApplyCategoryTabLayout(dragState.previewOrder, dragState.categoryId)
+    end
+end
+
+
+function RB:GetSlotIndexFromCursor()
+    if not self.frame or not self.frame.slotArea then
+        return nil
+    end
+
+    local x, y = GetCursorPosition()
+    local scale = UIParent:GetEffectiveScale() or 1
+    x = x / scale
+    y = y / scale
+
+    local left = self.frame.slotArea:GetLeft() or 0
+    local right = self.frame.slotArea:GetRight() or 0
+    local top = self.frame.slotArea:GetTop() or 0
+    local bottom = self.frame.slotArea:GetBottom() or 0
+
+    if x < left or x > right or y > top or y < bottom then
+        return nil
+    end
+
+    local localX = x - left - self.SLOT_PAD_X
+    local localY = (top - y) - self.SLOT_PAD_Y
+
+    if localX < 0 or localY < 0 then
+        return nil
+    end
+
+    local stepX = self.SLOT_SIZE + self.SLOT_SPACING_X
+    local stepY = self.SLOT_SIZE + self.SLOT_SPACING_Y
+
+    local col = math.floor(localX / stepX) + 1
+    local row = math.floor(localY / stepY) + 1
+
+    if col < 1 or col > self.COLUMNS or row < 1 or row > self.ROWS then
+        return nil
+    end
+
+    local withinX = math.fmod(localX, stepX)
+    local withinY = math.fmod(localY, stepY)
+
+    if withinX > self.SLOT_SIZE or withinY > self.SLOT_SIZE then
+        return nil
+    end
+
+    return (row - 1) * self.COLUMNS + col
+end
+
+function RB:UpdateItemDragPreview()
+    local dragState = self.dragState
+    if not dragState or dragState.kind ~= "item" or not self.frame or not self.frame.slotButtons then
+        return
+    end
+
+    local slotIndex = self:GetSlotIndexFromCursor()
+    if slotIndex ~= dragState.previewTargetSlotIndex then
+        dragState.previewTargetSlotIndex = slotIndex
+        self:Debug("UpdateItemDragPreview: targetSlot=" .. tostring(slotIndex), true)
+    end
+
+    if slotIndex and self.frame.slotButtons[slotIndex] then
+        self:SetDragHover(self.frame.slotButtons[slotIndex])
+    else
+        self:SetDragHover(nil)
+    end
 end
 
 local function setButtonCount(button, count)
@@ -773,6 +1200,9 @@ function RB:HandleServerMessage(message)
         local totalPages = tonumber(parts[4]) or 1
         local items = self:ParseItems(parts[5] or "")
         self:SetPageData(categoryId, page, totalPages, items)
+        if categoryId and categoryId > 0 then
+            self:SyncLayoutWithRawItems(categoryId, page, items)
+        end
         self.state.currentCategory = categoryId
         self.state.currentPage = page
         self.state.totalPages = totalPages
@@ -797,6 +1227,351 @@ function RB:HandleServerMessage(message)
     end
 
     self:Debug("Unknown opcode received: " .. tostring(opcode), true)
+end
+
+function RB:CreateDragVisual()
+    if self.dragVisual then
+        return
+    end
+
+    local frame = CreateFrame("Frame", nil, UIParent)
+    frame:SetFrameStrata("TOOLTIP")
+    frame:SetToplevel(true)
+    frame:EnableMouse(false)
+    frame:Hide()
+
+    local icon = frame:CreateTexture(nil, "ARTWORK")
+    icon:SetAllPoints()
+    frame.icon = icon
+
+    local countText = frame:CreateFontString(nil, "OVERLAY")
+    countText:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -2, 2)
+    countText:SetFont(STANDARD_TEXT_FONT, 13, "OUTLINE")
+    countText:SetTextColor(1, 1, 1, 1)
+    countText:SetJustifyH("RIGHT")
+    countText:SetShadowColor(0, 0, 0, 1)
+    countText:SetShadowOffset(1, -1)
+    countText:Hide()
+    frame.countText = countText
+
+    frame:SetScript("OnUpdate", function(selfFrame)
+        if not RB.dragState then
+            selfFrame:Hide()
+            return
+        end
+
+        local x, y = GetCursorPosition()
+        local scale = UIParent:GetEffectiveScale() or 1
+        x = x / scale
+        y = y / scale
+
+        selfFrame:ClearAllPoints()
+
+        if RB.dragState.kind == "category" then
+            local visualX, visualY = RB:GetCategoryDragVisualPosition()
+            if visualX and visualY then
+                selfFrame:SetPoint("CENTER", UIParent, "BOTTOMLEFT", visualX, visualY)
+            else
+                selfFrame:SetPoint("CENTER", UIParent, "BOTTOMLEFT", x, y)
+            end
+
+            RB:UpdateCategoryDragPreview()
+        else
+            selfFrame:SetPoint("CENTER", UIParent, "BOTTOMLEFT", x + 12, y - 12)
+            RB:UpdateItemDragPreview()
+        end
+
+        if IsMouseButtonDown and not IsMouseButtonDown("LeftButton") then
+            RB:CompleteActiveDrag()
+        end
+    end)
+
+    self.dragVisual = frame
+end
+
+function RB:UpdateDragVisualCount(count)
+    if not self.dragVisual or not self.dragVisual.countText then
+        return
+    end
+
+    local widget = self.dragVisual.countText
+    local fontSize = 13
+    local text = ""
+
+    if count and count > 1 then
+        text = tostring(count)
+
+        if count > 9999 then
+            text = "∞"
+            fontSize = 12
+        elseif count > 999 then
+            fontSize = 9
+        end
+    end
+
+    widget:SetFont(STANDARD_TEXT_FONT, fontSize, "OUTLINE")
+    widget:SetTextColor(1, 1, 1, 1)
+    widget:SetShadowColor(0, 0, 0, 1)
+    widget:SetShadowOffset(1, -1)
+    widget:SetText(text)
+
+    if text ~= "" then
+        widget:Show()
+    else
+        widget:Hide()
+    end
+end
+
+function RB:SetSlotDropHighlight(button, enabled)
+    if not button then
+        return
+    end
+
+    if not button.RBDropHighlight then
+        local texture = button:CreateTexture(nil, "OVERLAY")
+        texture:SetTexture("Interface\Buttons\UI-ActionButton-Border")
+        texture:SetBlendMode("ADD")
+        texture:SetAlpha(0.95)
+        texture:SetPoint("TOPLEFT", button, "TOPLEFT", -10, 10)
+        texture:SetPoint("BOTTOMRIGHT", button, "BOTTOMRIGHT", 10, -10)
+        texture:Hide()
+        button.RBDropHighlight = texture
+    end
+
+    if enabled then
+        button.RBDropHighlight:Show()
+    else
+        button.RBDropHighlight:Hide()
+    end
+end
+
+function RB:SetTabDropHighlight(button, enabled)
+    if not button then
+        return
+    end
+
+    if enabled then
+        button:SetBackdropBorderColor(1.00, 0.95, 0.30, 1.00)
+        button:SetBackdropColor(0.28, 0.14, 0.05, 1.00)
+    else
+        self:RefreshTabs()
+    end
+end
+
+function RB:ClearActiveDrag()
+    local dragState = self.dragState
+    if not dragState then
+        return
+    end
+
+    if dragState.hoverButton then
+        if dragState.kind == "item" then
+            self:SetSlotDropHighlight(dragState.hoverButton, false)
+        elseif dragState.kind == "category" then
+            self:SetTabDropHighlight(dragState.hoverButton, false)
+        end
+    end
+
+    if dragState.kind == "item" and dragState.sourceButton then
+        dragState.sourceButton:SetAlpha(1)
+    end
+
+    self.dragState = nil
+
+    if self.dragVisual then
+        self.dragVisual:Hide()
+    end
+
+    self:ApplyCategoryTabLayout()
+end
+
+function RB:SetDragHover(button)
+    local dragState = self.dragState
+    if not dragState then
+        return
+    end
+
+    if dragState.hoverButton == button then
+        return
+    end
+
+    if dragState.hoverButton then
+        if dragState.kind == "item" then
+            self:SetSlotDropHighlight(dragState.hoverButton, false)
+        elseif dragState.kind == "category" then
+            self:SetTabDropHighlight(dragState.hoverButton, false)
+        end
+    end
+
+    dragState.hoverButton = button
+
+    if button then
+        if dragState.kind == "item" then
+            self:SetSlotDropHighlight(button, true)
+        elseif dragState.kind == "category" then
+            self:SetTabDropHighlight(button, true)
+        end
+    end
+end
+
+function RB:StartItemDrag(button)
+    if self.state.isSearchMode or not button or not button.itemData or (IsModifiedClick and IsModifiedClick()) then
+        return
+    end
+
+    self:ClearActiveDrag()
+    self:CreateDragVisual()
+
+    self.dragState = {
+        kind = "item",
+        sourceButton = button,
+        sourceSlotIndex = button.slotIndex,
+        itemData = shallowItemCopy(button.itemData),
+        hoverButton = nil,
+        previewTargetSlotIndex = button.slotIndex,
+    }
+
+    self:Debug(
+        "StartItemDrag: sourceSlot=" .. tostring(button.slotIndex)
+        .. ", itemID=" .. tostring(button.itemData.itemID)
+        .. ", count=" .. tostring(button.itemData.count),
+        true
+    )
+
+    button:SetAlpha(0.35)
+
+    self.dragVisual:SetSize(self.SLOT_SIZE, self.SLOT_SIZE)
+    self.dragVisual.icon:SetTexture(GetItemIcon(button.itemData.itemID))
+    self:UpdateDragVisualCount(button.itemData.count)
+    self.dragVisual:Show()
+end
+
+function RB:StartCategoryDrag(button)
+    if self.state.isSearchMode or not button or not button.categoryId then
+        return
+    end
+
+    self:ClearActiveDrag()
+    self:CreateDragVisual()
+
+    local order = self:NormalizeCategoryOrder()
+    local sourceIndex = 1
+
+    for index, categoryId in ipairs(order) do
+        if categoryId == button.categoryId then
+            sourceIndex = index
+            break
+        end
+    end
+
+    self.dragState = {
+        kind = "category",
+        sourceButton = button,
+        categoryId = button.categoryId,
+        previewInsertIndex = sourceIndex,
+        previewOrder = self:BuildCategoryPreviewOrderByIndex(button.categoryId, sourceIndex),
+    }
+
+    self.dragVisual:SetSize(getCategoryButtonWidth(), getCategoryButtonHeight())
+    self.dragVisual.icon:SetTexture(button.icon:GetTexture())
+    self:UpdateDragVisualCount(0)
+    self.dragVisual:Show()
+
+    self:ApplyCategoryTabLayout(self.dragState.previewOrder, self.dragState.categoryId)
+    self:UpdateCategoryDragPreview()
+end
+
+function RB:CompleteActiveDrag()
+    local dragState = self.dragState
+    if not dragState then
+        return
+    end
+
+    if dragState.kind == "item" then
+        local targetSlotIndex = dragState.previewTargetSlotIndex
+        local targetButton = dragState.hoverButton
+
+        if not targetSlotIndex and targetButton and targetButton.slotIndex then
+            targetSlotIndex = targetButton.slotIndex
+        end
+
+        self:Debug(
+            "CompleteActiveDrag(item): sourceSlot=" .. tostring(dragState.sourceSlotIndex)
+            .. ", targetSlot=" .. tostring(targetSlotIndex),
+            true
+        )
+
+        if targetSlotIndex then
+            self:MoveDisplayedItem(dragState.sourceSlotIndex, targetSlotIndex)
+        end
+    elseif dragState.kind == "category" then
+        if dragState.previewOrder and #dragState.previewOrder > 0 then
+            ReagentBankUI_DB.categoryOrder = dragState.previewOrder
+        end
+    end
+
+    self:ClearActiveDrag()
+    self:Render()
+end
+
+function RB:ApplyCategoryTabLayout(orderOverride, placeholderCategoryId)
+    if not self.frame or not self.frame.categoryTabs then
+        return
+    end
+
+    local orderedIds
+    if orderOverride then
+        orderedIds = orderOverride
+    else
+        orderedIds = self:NormalizeCategoryOrder()
+    end
+
+    local previous = nil
+
+    for index, categoryId in ipairs(orderedIds) do
+        local tab = self.frame.categoryTabs[index]
+        if tab then
+            tab:ClearAllPoints()
+            tab:SetAlpha(1)
+            if previous then
+                tab:SetPoint("TOP", previous, "BOTTOM", 0, -self.TAB_GAP)
+            else
+                tab:SetPoint("TOP", 0, -1)
+            end
+
+            if placeholderCategoryId and categoryId == placeholderCategoryId then
+                tab.categoryId = nil
+                tab.categoryName = nil
+                tab.isPlaceholder = true
+                tab.icon:SetTexture(nil)
+                tab:SetBackdropColor(0.06, 0.06, 0.06, 0.35)
+                tab:SetBackdropBorderColor(1.00, 0.82, 0.18, 0.95)
+                tab:Show()
+            else
+                local category = getCategoryById(categoryId)
+                tab.categoryId = category.id
+                tab.categoryName = category.name
+                tab.isPlaceholder = false
+                tab.icon:SetTexture(getCategoryIconTexture(category))
+
+                local isActive = (self.state.currentCategory == tab.categoryId and not self.state.isSearchMode)
+                setTabVisual(tab, isActive, tab.isHovered)
+                tab:Show()
+            end
+
+            previous = tab
+        end
+    end
+
+    for index = #orderedIds + 1, #self.frame.categoryTabs do
+        local tab = self.frame.categoryTabs[index]
+        tab.categoryId = nil
+        tab.categoryName = nil
+        tab.isPlaceholder = false
+        tab.icon:SetTexture(nil)
+        tab:SetAlpha(1)
+        tab:Hide()
+    end
 end
 
 function RB:CreateBackdrop(parent)
@@ -950,59 +1725,72 @@ end
 function RB:CreateTabs(parent)
     parent.categoryTabs = {}
 
-    local previous
-    for index, category in ipairs(self.categories) do
+    for index = 1, #self.categories do
         local tab = CreateFrame("Button", nil, parent.sidePanelInner)
         tab:SetSize(getCategoryButtonWidth(), getCategoryButtonHeight())
         tab:SetBackdrop({
-            bgFile = "Interface\\Buttons\\WHITE8X8",
-            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            bgFile = "Interface\Buttons\WHITE8X8",
+            edgeFile = "Interface\Tooltips\UI-Tooltip-Border",
             tile = false,
             edgeSize = 12,
             insets = { left = 2, right = 2, top = 2, bottom = 2 },
         })
-
-        if previous then
-            tab:SetPoint("TOP", previous, "BOTTOM", 0, -self.TAB_GAP)
-        else
-            tab:SetPoint("TOP", 0, -1)
-        end
+        tab:RegisterForDrag("LeftButton")
 
         local icon = tab:CreateTexture(nil, "ARTWORK")
         icon:SetSize(self.CATEGORY_ICON_SIZE, self.CATEGORY_ICON_SIZE)
         icon:SetPoint("CENTER", 0, 0)
-        icon:SetTexture(getCategoryIconTexture(category))
         tab.icon = icon
 
-        tab.categoryId = category.id
-        tab.categoryName = category.name
+        tab.categoryId = nil
+        tab.categoryName = nil
         tab.isHovered = false
 
         tab:SetScript("OnClick", function(button)
-            RB.state.currentCategory = button.categoryId
-            RB.state.currentPage = 1
-            RB:RequestCategory(button.categoryId, 1)
+            if RB.dragState and RB.dragState.kind == "category" then
+                return
+            end
+
+            if button.categoryId then
+                RB.state.currentCategory = button.categoryId
+                RB.state.currentPage = 1
+                RB:RequestCategory(button.categoryId, 1)
+            end
+        end)
+
+        tab:SetScript("OnDragStart", function(button)
+            RB:StartCategoryDrag(button)
         end)
 
         tab:SetScript("OnEnter", function(button)
             button.isHovered = true
+            if RB.dragState and RB.dragState.kind == "category" then
+                return
+            end
+
             setTabVisual(button, RB.state.currentCategory == button.categoryId and not RB.state.isSearchMode, true)
             GameTooltip:SetOwner(button, "ANCHOR_LEFT")
-            GameTooltip:SetText(button.categoryName)
+            GameTooltip:SetText(button.categoryName or "")
             GameTooltip:AddLine("ЛКМ: відкрити категорію", 0.8, 0.8, 0.8)
+            GameTooltip:AddLine("Перетягування: змінити порядок", 0.8, 0.8, 0.8)
             GameTooltip:Show()
         end)
 
         tab:SetScript("OnLeave", function(button)
             button.isHovered = false
+            if RB.dragState and RB.dragState.kind == "category" then
+                GameTooltip:Hide()
+                return
+            end
+
             setTabVisual(button, RB.state.currentCategory == button.categoryId and not RB.state.isSearchMode, false)
             GameTooltip:Hide()
         end)
 
-        setTabVisual(tab, false, false)
         parent.categoryTabs[index] = tab
-        previous = tab
     end
+
+    self:ApplyCategoryTabLayout()
 end
 
 function RB:CreateSlots(parent)
@@ -1022,11 +1810,12 @@ function RB:CreateSlots(parent)
                 startY - (row - 1) * (self.SLOT_SIZE + self.SLOT_SPACING_Y)
             )
             button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            button:RegisterForDrag("LeftButton")
             button.slotIndex = index
             button.itemData = nil
 
             local emptyBg = button:CreateTexture(nil, "BACKGROUND")
-            emptyBg:SetTexture("Interface\\Buttons\\WHITE8X8")
+            emptyBg:SetTexture("Interface\Buttons\WHITE8X8")
             emptyBg:SetPoint("TOPLEFT", 5, -5)
             emptyBg:SetPoint("BOTTOMRIGHT", -5, 5)
             emptyBg:SetVertexColor(0.11, 0.11, 0.11, 0.95)
@@ -1037,8 +1826,10 @@ function RB:CreateSlots(parent)
             end
 
             local countText = button:CreateFontString(nil, "OVERLAY")
+            countText:SetDrawLayer("OVERLAY", 7)
             countText:SetPoint("BOTTOMRIGHT", button, "BOTTOMRIGHT", -2, 2)
             countText:SetFont(STANDARD_TEXT_FONT, 13, "OUTLINE")
+            countText:SetTextColor(1, 1, 1, 1)
             countText:SetJustifyH("RIGHT")
             countText:SetShadowColor(0, 0, 0, 1)
             countText:SetShadowOffset(1, -1)
@@ -1046,6 +1837,11 @@ function RB:CreateSlots(parent)
             button.CountText = countText
 
             button:SetScript("OnEnter", function(selfButton)
+                if RB.dragState and RB.dragState.kind == "item" then
+                    RB:SetDragHover(selfButton)
+                    return
+                end
+
                 if not selfButton.itemData then
                     return
                 end
@@ -1054,14 +1850,26 @@ function RB:CreateSlots(parent)
                 GameTooltip:SetHyperlink("item:" .. selfButton.itemData.itemID)
                 GameTooltip:AddLine(" ")
                 GameTooltip:AddLine("ПКМ: зняти 1 стак", 0.7, 1.0, 0.7)
+                GameTooltip:AddLine("ЛКМ+перетягування: змінити слот", 0.8, 0.8, 0.8)
                 GameTooltip:Show()
             end)
 
-            button:SetScript("OnLeave", function()
+            button:SetScript("OnLeave", function(selfButton)
+                if RB.dragState and RB.dragState.kind == "item" and RB.dragState.hoverButton == selfButton then
+                    RB:SetDragHover(nil)
+                end
                 GameTooltip:Hide()
             end)
 
+            button:SetScript("OnDragStart", function(selfButton)
+                RB:StartItemDrag(selfButton)
+            end)
+
             button:SetScript("OnClick", function(selfButton, mouseButton)
+                if RB.dragState and RB.dragState.kind == "item" and mouseButton == "LeftButton" then
+                    return
+                end
+
                 if not selfButton.itemData then
                     return
                 end
@@ -1089,17 +1897,22 @@ function RB:RefreshTabs()
         return
     end
 
-    for index, category in ipairs(self.categories) do
-        local tab = self.frame.categoryTabs[index]
-        if tab then
-            local isActive = (self.state.currentCategory == category.id and not self.state.isSearchMode)
+    if self.dragState and self.dragState.kind == "category" and self.dragState.previewOrder then
+        self:ApplyCategoryTabLayout(self.dragState.previewOrder, self.dragState.categoryId)
+    else
+        self:ApplyCategoryTabLayout()
+    end
+
+    for _, tab in ipairs(self.frame.categoryTabs) do
+        if tab:IsShown() and not tab.isPlaceholder then
+            local isActive = (self.state.currentCategory == tab.categoryId and not self.state.isSearchMode)
             setTabVisual(tab, isActive, tab.isHovered)
         end
     end
 end
 
 function RB:RefreshSlots()
-    local items = self:GetCurrentItems()
+    local items = self:GetDisplayedItems()
     for index, button in ipairs(self.frame.slotButtons) do
         local item = items[index]
         local previous = button.itemData
@@ -1183,6 +1996,7 @@ function RB:Show()
 end
 
 function RB:Hide()
+    self:ClearActiveDrag()
     self:RestoreBagButtonOverrides()
     if self.frame then
         self.frame:Hide()
@@ -1359,6 +2173,7 @@ function RB:CreateFrame()
     self:CreateFooter(frame)
     self:CreateSlots(frame)
     self:CreateTabs(frame)
+    self:CreateDragVisual()
     self:InstallBagHook()
 end
 
@@ -1381,8 +2196,11 @@ eventFrame:SetScript("OnEvent", function(_, event, ...)
             ReagentBankUI_DB = {}
         end
 
+        ReagentBankUI_DB.layout = ReagentBankUI_DB.layout or {}
+        ReagentBankUI_DB.categoryOrder = ReagentBankUI_DB.categoryOrder or {}
         ReagentBankUI_DB.debug = false
         RB.DEBUG = false
+        RB:NormalizeCategoryOrder()
 
         RB:InstallBagHook()
 
