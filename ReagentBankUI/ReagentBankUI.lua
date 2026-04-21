@@ -60,6 +60,9 @@ RB.dragState = nil
 RB.dragVisual = nil
 RB.pendingBagDrag = nil
 RB.pendingDepositCategory = nil
+RB.pendingDepositItemID = nil
+RB.pendingDepositTargetSlotIndex = nil
+RB.pendingDepositPage = nil
 
 
 local function wipeTable(tbl)
@@ -1292,6 +1295,12 @@ function RB:HandleServerMessage(message)
     if opcode == "STATUS" then
         self:Debug("Opcode STATUS received: " .. tostring(parts[2] or ""))
         self.state.statusText = parts[2] or ""
+        if self.pendingDepositItemID and string.sub(self.state.statusText, 1, string.len("Покладено до сховища:")) ~= "Покладено до сховища:" then
+            self.pendingDepositItemID = nil
+            self.pendingDepositTargetSlotIndex = nil
+            self.pendingDepositCategory = nil
+            self.pendingDepositPage = nil
+        end
         if self.state.statusText ~= "" then
             self:Print(self.state.statusText)
         end
@@ -1307,6 +1316,7 @@ function RB:HandleServerMessage(message)
         self:SetPageData(categoryId, page, totalPages, items)
         if categoryId and categoryId > 0 then
             self:SyncLayoutWithRawItems(categoryId, page, items)
+            self:ApplyPendingDepositPlacement(categoryId, page, items)
         end
         self.state.currentCategory = categoryId
         self.state.currentPage = page
@@ -1952,14 +1962,32 @@ function RB:CreateSlots(parent)
     parent.slotArea:SetScript("OnUpdate", function()
         if RB.pendingBagDrag and CursorHasItem and not CursorHasItem() then
             RB:ClearPendingBagDrag()
+        elseif RB.pendingBagDrag then
+            RB:UpdatePendingBagDragCategory()
+            local slotIndex = RB:GetPendingBagDragTargetSlotIndex()
+            if slotIndex ~= RB.pendingBagDrag.targetSlotIndex then
+                if RB.pendingBagDrag.targetSlotIndex and RB.frame and RB.frame.slotButtons then
+                    local previous = RB.frame.slotButtons[RB.pendingBagDrag.targetSlotIndex]
+                    if previous then
+                        RB:SetSlotDropHighlight(previous, false)
+                    end
+                end
+                RB.pendingBagDrag.targetSlotIndex = slotIndex
+                if slotIndex and RB.frame and RB.frame.slotButtons then
+                    local current = RB.frame.slotButtons[slotIndex]
+                    if current then
+                        RB:SetSlotDropHighlight(current, true)
+                    end
+                end
+            end
         end
     end)
     parent.slotArea:SetScript("OnReceiveDrag", function()
-        RB:TryDepositPendingBagDrag()
+        RB:TryDepositPendingBagDrag(nil)
     end)
     parent.slotArea:SetScript("OnMouseUp", function(_, mouseButton)
         if mouseButton == "LeftButton" then
-            RB:TryDepositPendingBagDrag()
+            RB:TryDepositPendingBagDrag(nil)
         end
     end)
     parent.slotArea:SetScript("OnEnter", function()
@@ -2047,14 +2075,14 @@ function RB:CreateSlots(parent)
             end)
 
             button:SetScript("OnReceiveDrag", function(selfButton)
-                if RB:TryDepositPendingBagDrag() then
+                if RB:TryDepositPendingBagDrag(selfButton.slotIndex) then
                     RB:SetSlotDropHighlight(selfButton, false)
                 end
             end)
 
             button:SetScript("OnMouseUp", function(selfButton, mouseButton)
                 if mouseButton == "LeftButton" and RB.pendingBagDrag and CursorHasItem and CursorHasItem() then
-                    if RB:TryDepositPendingBagDrag() then
+                    if RB:TryDepositPendingBagDrag(selfButton.slotIndex) then
                         RB:SetSlotDropHighlight(selfButton, false)
                     end
                 end
@@ -2271,6 +2299,94 @@ function RB:InferCategoryIdForItem(itemID)
     return nil
 end
 
+function RB:QueuePendingDepositPlacement(categoryId, slotIndex, itemID)
+    if not categoryId or categoryId <= 0 or not slotIndex or slotIndex < 1 or slotIndex > self.PAGE_SIZE or not itemID then
+        self.pendingDepositItemID = nil
+        self.pendingDepositTargetSlotIndex = nil
+        self.pendingDepositPage = nil
+        return
+    end
+
+    self.pendingDepositCategory = categoryId
+    self.pendingDepositItemID = tonumber(itemID)
+    self.pendingDepositTargetSlotIndex = tonumber(slotIndex)
+    self.pendingDepositPage = self.state.currentPage or 1
+    self:ApplyPendingDepositPlacement(categoryId, self.pendingDepositPage, nil)
+end
+
+function RB:ApplyPendingDepositPlacement(categoryId, page, rawItems)
+    local targetSlotIndex = self.pendingDepositTargetSlotIndex
+    local itemID = self.pendingDepositItemID
+    if not targetSlotIndex or not itemID or categoryId ~= self.pendingDepositCategory or page ~= (self.pendingDepositPage or 1) then
+        return
+    end
+
+    if rawItems then
+        local itemPresent = false
+        for _, item in ipairs(rawItems) do
+            if item and item.itemID == itemID then
+                itemPresent = true
+                break
+            end
+        end
+
+        if not itemPresent then
+            return
+        end
+    end
+
+    local bucket = self:GetLayoutBucket(categoryId, page)
+    local previousSlotIndex = nil
+    local displacedItemID = bucket[targetSlotIndex]
+
+    for slotIndex = 1, self.PAGE_SIZE do
+        if bucket[slotIndex] == itemID then
+            previousSlotIndex = slotIndex
+            bucket[slotIndex] = nil
+            break
+        end
+    end
+
+    bucket[targetSlotIndex] = itemID
+
+    if displacedItemID and displacedItemID ~= itemID then
+        if previousSlotIndex and previousSlotIndex ~= targetSlotIndex then
+            bucket[previousSlotIndex] = displacedItemID
+        else
+            for slotIndex = 1, self.PAGE_SIZE do
+                if slotIndex ~= targetSlotIndex and not bucket[slotIndex] then
+                    bucket[slotIndex] = displacedItemID
+                    break
+                end
+            end
+        end
+    end
+
+    self.pendingDepositItemID = nil
+    self.pendingDepositTargetSlotIndex = nil
+    self.pendingDepositPage = nil
+end
+
+function RB:UpdatePendingBagDragCategory()
+    local drag = self.pendingBagDrag
+    if not drag or drag.categoryId or not drag.itemID then
+        return
+    end
+
+    drag.categoryId = self:InferCategoryIdForItem(drag.itemID)
+    if not drag.categoryId then
+        return
+    end
+
+    if self.state.isSearchMode or self.state.currentCategory ~= drag.categoryId or self.state.currentPage ~= 1 then
+        self.state.isSearchMode = false
+        self.state.currentCategory = drag.categoryId
+        self.state.lastCategory = drag.categoryId
+        self.state.currentPage = 1
+        self:RequestCategory(drag.categoryId, 1)
+    end
+end
+
 function RB:SetBankDropActive(enabled)
     if not self.frame or not self.frame.slotArea then
         return
@@ -2287,6 +2403,12 @@ function RB:SetBankDropActive(enabled)
 end
 
 function RB:ClearPendingBagDrag()
+    if self.pendingBagDrag and self.pendingBagDrag.targetSlotIndex and self.frame and self.frame.slotButtons then
+        local button = self.frame.slotButtons[self.pendingBagDrag.targetSlotIndex]
+        if button then
+            self:SetSlotDropHighlight(button, false)
+        end
+    end
     self.pendingBagDrag = nil
     self:SetBankDropActive(false)
 end
@@ -2301,12 +2423,18 @@ function RB:TrackBagItemDrag(button)
         return
     end
 
-    local itemID = getCursorItemID()
+    local _, itemID, itemCount = self:IsDepositableBagItem(bag, slot)
+    if not itemID then
+        itemID = getCursorItemID()
+    end
+
     self.pendingBagDrag = {
         bag = bag,
         slot = slot,
         itemID = itemID,
+        itemCount = itemCount,
         categoryId = self:InferCategoryIdForItem(itemID),
+        targetSlotIndex = nil,
     }
     self:SetBankDropActive(true)
 
@@ -2317,6 +2445,16 @@ function RB:TrackBagItemDrag(button)
         .. ", categoryId=" .. tostring(self.pendingBagDrag.categoryId),
         true
     )
+
+    if self.pendingBagDrag.categoryId and (self.state.isSearchMode or self.state.currentCategory ~= self.pendingBagDrag.categoryId or self.state.currentPage ~= 1) then
+        self.state.isSearchMode = false
+        self.state.currentCategory = self.pendingBagDrag.categoryId
+        self.state.lastCategory = self.pendingBagDrag.categoryId
+        self.state.currentPage = 1
+        self:RequestCategory(self.pendingBagDrag.categoryId, 1)
+    else
+        self:UpdatePendingBagDragCategory()
+    end
 end
 
 function RB:HandleBankDropTargetEnter(button)
@@ -2328,6 +2466,7 @@ function RB:HandleBankDropTargetEnter(button)
     if self.pendingBagDrag and CursorHasItem and CursorHasItem() then
         self:SetBankDropActive(true)
         if button then
+            self.pendingBagDrag.targetSlotIndex = button.slotIndex
             self:SetSlotDropHighlight(button, true)
         end
     end
@@ -2340,6 +2479,9 @@ function RB:HandleBankDropTargetLeave(button)
 
     if button then
         self:SetSlotDropHighlight(button, false)
+        if self.pendingBagDrag and self.pendingBagDrag.targetSlotIndex == button.slotIndex then
+            self.pendingBagDrag.targetSlotIndex = nil
+        end
     end
 
     if self.pendingBagDrag and CursorHasItem and CursorHasItem() then
@@ -2349,7 +2491,41 @@ function RB:HandleBankDropTargetLeave(button)
     end
 end
 
-function RB:TryDepositPendingBagDrag()
+function RB:GetSlotIndexUnderCursor()
+    if not self.frame or not self.frame.slotButtons then
+        return nil
+    end
+
+    local x, y = GetCursorPosition()
+    local scale = UIParent:GetEffectiveScale() or 1
+    x = x / scale
+    y = y / scale
+
+    for _, button in ipairs(self.frame.slotButtons) do
+        if button and button:IsShown() then
+            local left = button:GetLeft()
+            local right = button:GetRight()
+            local top = button:GetTop()
+            local bottom = button:GetBottom()
+            if left and right and top and bottom and x >= left and x <= right and y >= bottom and y <= top then
+                return button.slotIndex
+            end
+        end
+    end
+
+    return nil
+end
+
+function RB:GetPendingBagDragTargetSlotIndex()
+    local drag = self.pendingBagDrag
+    if not drag then
+        return nil
+    end
+
+    return self:GetSlotIndexUnderCursor() or drag.targetSlotIndex
+end
+
+function RB:TryDepositPendingBagDrag(targetSlotIndex)
     if not self:IsShown() then
         return false
     end
@@ -2367,15 +2543,19 @@ function RB:TryDepositPendingBagDrag()
     end
 
     local itemID = tonumber(drag.itemID)
+    local itemCount = tonumber(drag.itemCount)
     local itemName = itemID and GetItemInfo(itemID) or nil
+    targetSlotIndex = tonumber(targetSlotIndex) or self:GetPendingBagDragTargetSlotIndex()
 
-    self.pendingDepositCategory = drag.categoryId
+    self.pendingDepositCategory = drag.categoryId or (self.state.currentCategory and self.state.currentCategory > 0 and self.state.currentCategory or self.state.lastCategory)
     if self.pendingDepositCategory then
         self.state.isSearchMode = false
         self.state.currentCategory = self.pendingDepositCategory
         self.state.lastCategory = self.pendingDepositCategory
         self.state.currentPage = 1
     end
+
+    self:QueuePendingDepositPlacement(self.pendingDepositCategory, targetSlotIndex, itemID)
 
     self.state.statusText = itemName and ("Перенесення: " .. itemName .. "...") or "Перенесення предмета..."
     self:Render()
@@ -2384,7 +2564,7 @@ function RB:TryDepositPendingBagDrag()
         ClearCursor()
     end
 
-    self:RequestDepositBagItem(bag, slot, itemID, nil)
+    self:RequestDepositBagItem(bag, slot, itemID, itemCount)
     self:ClearPendingBagDrag()
     return true
 end
@@ -2399,12 +2579,6 @@ function RB:GetContainerItemButtonInfo(button)
     local slot = button.GetID and button:GetID()
 
     return bag, slot
-end
-
-function RB:ApplyBagButtonOverrides()
-end
-
-function RB:RestoreBagButtonOverrides()
 end
 
 function RB:InstallBagHook()
