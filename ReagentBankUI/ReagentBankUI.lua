@@ -47,7 +47,7 @@ RB.state = {
     totalPages = 1,
     isSearchMode = false,
     searchQuery = "",
-    statusText = "ПКМ по предмету в сховищі — зняти 1 стак.",
+    statusText = "ПКМ по предмету в сховищі — зняти 1 стак. Перетягніть предмет із сумки у вікно банку, щоб вкласти його.",
     pageCache = {},
     demoMode = false,
     pendingOpen = false,
@@ -58,6 +58,8 @@ RB.DEBUG = false
 
 RB.dragState = nil
 RB.dragVisual = nil
+RB.pendingBagDrag = nil
+RB.pendingDepositCategory = nil
 
 
 local function wipeTable(tbl)
@@ -91,6 +93,46 @@ local function trim(str)
     return (str:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+local BAG_DRAG_CATEGORY_BY_SUBCLASS = {
+    ["Cloth"] = 5,
+    ["Ткань"] = 5,
+    ["Тканина"] = 5,
+    ["Meat"] = 8,
+    ["Мясо"] = 8,
+    ["М'ясо"] = 8,
+    ["Metal & Stone"] = 7,
+    ["Metal and Stone"] = 7,
+    ["Металл и камень"] = 7,
+    ["Метал і Каміння"] = 7,
+    ["Enchanting"] = 12,
+    ["Наложение чар"] = 12,
+    ["Зачарування"] = 12,
+    ["Elemental"] = 10,
+    ["Стихии"] = 10,
+    ["Стихії"] = 10,
+    ["Parts"] = 1,
+    ["Детали"] = 1,
+    ["Деталі"] = 1,
+    ["Other"] = 11,
+    ["Разное"] = 11,
+    ["Інші товари"] = 11,
+    ["Herb"] = 9,
+    ["Трава"] = 9,
+    ["Трави"] = 9,
+    ["Leather"] = 6,
+    ["Кожа"] = 6,
+    ["Шкіра"] = 6,
+    ["Jewelcrafting"] = 4,
+    ["Ювелирное дело"] = 4,
+    ["Ювелірна справа"] = 4,
+    ["Explosives"] = 2,
+    ["Взрывчатка"] = 2,
+    ["Вибухівка"] = 2,
+    ["Devices"] = 3,
+    ["Устройства"] = 3,
+    ["Пристрої"] = 3,
+}
+
 
 local function shallowItemCopy(item)
     if not item then
@@ -101,6 +143,19 @@ local function shallowItemCopy(item)
         itemID = item.itemID,
         count = item.count,
     }
+end
+
+local function getCursorItemID()
+    if not GetCursorInfo then
+        return nil
+    end
+
+    local cursorType, itemID = GetCursorInfo()
+    if cursorType == "item" then
+        return tonumber(itemID)
+    end
+
+    return nil
 end
 
 local function itemEquals(a, b)
@@ -856,7 +911,7 @@ end
 function RB:BuildDemoData()
     self:ClearAllData()
     self.state.demoMode = true
-    self.state.statusText = "Демо-режим. ПКМ по предмету в сховищі — зняти 1 стак."
+    self.state.statusText = "Демо-режим. ПКМ по предмету в сховищі — зняти 1 стак. Перетягніть предмет із сумки у вікно банку, щоб вкласти його."
 
     local demoByCategory = {
         [5] = { 2589, 2592, 4306, 4338, 14047, 14342, 21877, 33470, 2320, 2996, 2997, 3182, 4305, 10285, 4339, 14048, 14256, 21840, 21845, 24271 },
@@ -1048,7 +1103,7 @@ function RB:RequestCategory(categoryId, page, forceRefresh)
     local bucket = self.state.pageCache[categoryId]
     if not forceRefresh and bucket and bucket.pages[page] then
         self.state.totalPages = bucket.totalPages or 1
-        self.state.statusText = "ПКМ по предмету в сховищі — зняти 1 стак."
+        self.state.statusText = "ПКМ по предмету в сховищі — зняти 1 стак. Перетягніть предмет із сумки у вікно банку, щоб вкласти його."
         self:Render()
         return
     end
@@ -1135,9 +1190,18 @@ function RB:RequestDepositBagItem(bag, slot, itemID, itemCount)
         return
     end
 
-    local safeItemID = tonumber(itemID) or 0
-    local safeItemCount = tonumber(itemCount) or 0
-    self:SendCommand(string.format("DEPOSIT_BAG|%d|%d|%d|%d", bag, slot, safeItemID, safeItemCount))
+    self.state.statusText = "Запит на внесення предмета..."
+    self:Render()
+
+    local payload = string.format("DEPOSIT_BAG|%d|%d", bag, slot)
+    if tonumber(itemID) then
+        payload = payload .. "|" .. tostring(tonumber(itemID))
+        if tonumber(itemCount) then
+            payload = payload .. "|" .. tostring(tonumber(itemCount))
+        end
+    end
+
+    self:SendCommand(payload)
 end
 
 function RB:RequestDepositAll()
@@ -1214,6 +1278,13 @@ function RB:HandleServerMessage(message)
     if opcode == "RESET" then
         self:Debug("Opcode RESET received", true)
         self.state.statusText = "Оновлено."
+        if self.pendingDepositCategory then
+            self.state.isSearchMode = false
+            self.state.currentCategory = self.pendingDepositCategory
+            self.state.lastCategory = self.pendingDepositCategory
+            self.state.currentPage = 1
+            self.pendingDepositCategory = nil
+        end
         self:ScheduleRefresh(0.20)
         return
     end
@@ -1252,7 +1323,7 @@ function RB:HandleServerMessage(message)
                 self.state.statusText = "Категорія порожня."
             end
         else
-            self.state.statusText = "ПКМ по предмету в сховищі — зняти 1 стак."
+            self.state.statusText = "ПКМ по предмету в сховищі — зняти 1 стак. Перетягніть предмет із сумки у вікно банку, щоб вкласти його."
         end
 
         self:Show()
@@ -1701,6 +1772,9 @@ function RB:CreateHeader(parent)
     local close = CreateFrame("Button", nil, parent, "UIPanelCloseButton")
     close:ClearAllPoints()
     close:SetPoint("TOPRIGHT", -4, -2)
+    close:SetScript("OnClick", function()
+        RB:Hide()
+    end)
     parent.closeButton = close
 
     local searchBox = CreateFrame("EditBox", nil, parent.searchBar, "InputBoxTemplate")
@@ -1874,6 +1948,26 @@ end
 
 function RB:CreateSlots(parent)
     parent.slotButtons = {}
+    parent.slotArea:EnableMouse(true)
+    parent.slotArea:SetScript("OnUpdate", function()
+        if RB.pendingBagDrag and CursorHasItem and not CursorHasItem() then
+            RB:ClearPendingBagDrag()
+        end
+    end)
+    parent.slotArea:SetScript("OnReceiveDrag", function()
+        RB:TryDepositPendingBagDrag()
+    end)
+    parent.slotArea:SetScript("OnMouseUp", function(_, mouseButton)
+        if mouseButton == "LeftButton" then
+            RB:TryDepositPendingBagDrag()
+        end
+    end)
+    parent.slotArea:SetScript("OnEnter", function()
+        RB:HandleBankDropTargetEnter(nil)
+    end)
+    parent.slotArea:SetScript("OnLeave", function()
+        RB:HandleBankDropTargetLeave(nil)
+    end)
 
     local startX = self.SLOT_PAD_X
     local startY = -self.SLOT_PAD_Y
@@ -1921,6 +2015,11 @@ function RB:CreateSlots(parent)
                     return
                 end
 
+                if RB.pendingBagDrag and CursorHasItem and CursorHasItem() then
+                    RB:HandleBankDropTargetEnter(selfButton)
+                    return
+                end
+
                 if not selfButton.itemData then
                     return
                 end
@@ -1937,11 +2036,28 @@ function RB:CreateSlots(parent)
                 if RB.dragState and RB.dragState.kind == "item" and RB.dragState.hoverButton == selfButton then
                     RB:SetDragHover(nil)
                 end
+                if RB.pendingBagDrag then
+                    RB:HandleBankDropTargetLeave(selfButton)
+                end
                 GameTooltip:Hide()
             end)
 
             button:SetScript("OnDragStart", function(selfButton)
                 RB:StartItemDrag(selfButton)
+            end)
+
+            button:SetScript("OnReceiveDrag", function(selfButton)
+                if RB:TryDepositPendingBagDrag() then
+                    RB:SetSlotDropHighlight(selfButton, false)
+                end
+            end)
+
+            button:SetScript("OnMouseUp", function(selfButton, mouseButton)
+                if mouseButton == "LeftButton" and RB.pendingBagDrag and CursorHasItem and CursorHasItem() then
+                    if RB:TryDepositPendingBagDrag() then
+                        RB:SetSlotDropHighlight(selfButton, false)
+                    end
+                end
             end)
 
             button:SetScript("OnClick", function(selfButton, mouseButton)
@@ -2069,14 +2185,13 @@ function RB:Show()
     if not self.frame then
         self:CreateFrame()
     end
-    self:ApplyBagButtonOverrides()
     self.frame:Show()
     self:Render()
 end
 
 function RB:Hide()
     self:ClearActiveDrag()
-    self:RestoreBagButtonOverrides()
+    self:ClearPendingBagDrag()
     if self.frame then
         self.frame:Hide()
     end
@@ -2100,17 +2215,17 @@ end
 
 function RB:IsDepositableBagItem(bag, slot)
     if bag == nil or slot == nil then
-        return false, nil, nil, "Неможливо визначити комірку сумки."
+        return false
     end
 
     local itemLink = GetContainerItemLink(bag, slot)
     if not itemLink then
-        return false, nil, nil, nil
+        return false
     end
 
     local _, itemCount, locked = GetContainerItemInfo(bag, slot)
     if locked then
-        return false, nil, nil, nil
+        return false
     end
 
     local itemID = GetContainerItemID and GetContainerItemID(bag, slot)
@@ -2121,15 +2236,157 @@ function RB:IsDepositableBagItem(bag, slot)
         end
     end
     if not itemID then
-        return false, nil, nil, "Не вдалося визначити предмет."
+        return false
     end
 
     local _, _, _, _, _, _, _, maxStack = GetItemInfo(itemID)
     if not maxStack or maxStack <= 1 then
-        return false, itemID, itemCount, "Цей предмет не можна покласти до сховища реагентів."
+        return false
     end
 
-    return true, itemID, itemCount, nil
+    return true, itemID, itemCount
+end
+
+function RB:InferCategoryIdForItem(itemID)
+    itemID = tonumber(itemID)
+    if not itemID then
+        return nil
+    end
+
+    if itemID == 34055 or itemID == 46849 then
+        return 12
+    end
+    if itemID == 38682 then
+        return 14
+    end
+    if itemID == 39349 then
+        return 15
+    end
+
+    local _, _, _, _, _, _, itemSubClass = GetItemInfo(itemID)
+    if itemSubClass then
+        return BAG_DRAG_CATEGORY_BY_SUBCLASS[itemSubClass]
+    end
+
+    return nil
+end
+
+function RB:SetBankDropActive(enabled)
+    if not self.frame or not self.frame.slotArea then
+        return
+    end
+
+    local slotArea = self.frame.slotArea
+    if enabled then
+        slotArea:SetBackdropBorderColor(1.00, 0.88, 0.20, 1.00)
+        slotArea:SetBackdropColor(0.12, 0.10, 0.04, 0.98)
+    else
+        slotArea:SetBackdropColor(0.06, 0.06, 0.06, 0.98)
+        slotArea:SetBackdropBorderColor(0.62, 0.50, 0.15, 0.95)
+    end
+end
+
+function RB:ClearPendingBagDrag()
+    self.pendingBagDrag = nil
+    self:SetBankDropActive(false)
+end
+
+function RB:TrackBagItemDrag(button)
+    if not self:IsShown() or not button then
+        return
+    end
+
+    local bag, slot = self:GetContainerItemButtonInfo(button)
+    if bag == nil or slot == nil then
+        return
+    end
+
+    local itemID = getCursorItemID()
+    self.pendingBagDrag = {
+        bag = bag,
+        slot = slot,
+        itemID = itemID,
+        categoryId = self:InferCategoryIdForItem(itemID),
+    }
+    self:SetBankDropActive(true)
+
+    self:Debug(
+        "TrackBagItemDrag: bag=" .. tostring(bag)
+        .. ", slot=" .. tostring(slot)
+        .. ", itemID=" .. tostring(itemID)
+        .. ", categoryId=" .. tostring(self.pendingBagDrag.categoryId),
+        true
+    )
+end
+
+function RB:HandleBankDropTargetEnter(button)
+    if self.dragState and self.dragState.kind == "item" then
+        self:SetDragHover(button)
+        return
+    end
+
+    if self.pendingBagDrag and CursorHasItem and CursorHasItem() then
+        self:SetBankDropActive(true)
+        if button then
+            self:SetSlotDropHighlight(button, true)
+        end
+    end
+end
+
+function RB:HandleBankDropTargetLeave(button)
+    if self.dragState and self.dragState.kind == "item" and self.dragState.hoverButton == button then
+        self:SetDragHover(nil)
+    end
+
+    if button then
+        self:SetSlotDropHighlight(button, false)
+    end
+
+    if self.pendingBagDrag and CursorHasItem and CursorHasItem() then
+        self:SetBankDropActive(true)
+    else
+        self:SetBankDropActive(false)
+    end
+end
+
+function RB:TryDepositPendingBagDrag()
+    if not self:IsShown() then
+        return false
+    end
+
+    local drag = self.pendingBagDrag
+    if not drag then
+        return false
+    end
+
+    local bag = tonumber(drag.bag)
+    local slot = tonumber(drag.slot)
+    if bag == nil or slot == nil then
+        self:ClearPendingBagDrag()
+        return false
+    end
+
+    local itemID = tonumber(drag.itemID)
+    local itemName = itemID and GetItemInfo(itemID) or nil
+
+    self.pendingDepositCategory = drag.categoryId
+    if self.pendingDepositCategory then
+        self.state.isSearchMode = false
+        self.state.currentCategory = self.pendingDepositCategory
+        self.state.lastCategory = self.pendingDepositCategory
+        self.state.currentPage = 1
+    end
+
+    self.state.statusText = itemName and ("Перенесення: " .. itemName .. "...") or "Перенесення предмета..."
+    self:Render()
+
+    if ClearCursor then
+        ClearCursor()
+    end
+
+    self:RequestDepositBagItem(bag, slot, itemID, nil)
+    self:ClearPendingBagDrag()
+    return true
 end
 
 function RB:GetContainerItemButtonInfo(button)
@@ -2144,71 +2401,10 @@ function RB:GetContainerItemButtonInfo(button)
     return bag, slot
 end
 
-function RB:HandleBagButtonClick(button, mouseButton)
-    if self:IsShown() and mouseButton == "RightButton" and not IsModifiedClick() then
-        local bag, slot = self:GetContainerItemButtonInfo(button)
-        local ok, itemID, itemCount, reason = self:IsDepositableBagItem(bag, slot)
-        self:Debug("BagOverride right click: bag=" .. tostring(bag) .. ", slot=" .. tostring(slot) .. ", ok=" .. boolToString(ok) .. ", itemID=" .. tostring(itemID) .. ", count=" .. tostring(itemCount), true)
-
-        if ok then
-            self:RequestDepositBagItem(bag, slot, itemID, itemCount)
-            return
-        end
-
-        if reason then
-            self:ShowCenterMessage(reason)
-            self:Print(reason)
-            return
-        end
-    end
-
-    local original = button and button.__RBOriginalOnClick
-    if original then
-        return original(button, mouseButton)
-    end
-
-    if type(ContainerFrameItemButton_OnClick) == "function" then
-        return ContainerFrameItemButton_OnClick(button, mouseButton)
-    end
-end
-
 function RB:ApplyBagButtonOverrides()
-    self.bagButtons = self.bagButtons or {}
-
-    for frameIndex = 1, (NUM_CONTAINER_FRAMES or 13) do
-        local frame = _G["ContainerFrame" .. frameIndex]
-        if frame and frame.GetName then
-            local frameName = frame:GetName()
-            local size = frame.size or 36
-            for slotIndex = 1, size do
-                local button = _G[frameName .. "Item" .. slotIndex]
-                if button and not button.__RBOverridden then
-                    button.__RBOriginalOnClick = button:GetScript("OnClick")
-                    button:SetScript("OnClick", function(btn, mouseButton)
-                        RB:HandleBagButtonClick(btn, mouseButton)
-                    end)
-                    button.__RBOverridden = true
-                    table.insert(self.bagButtons, button)
-                end
-            end
-        end
-    end
 end
 
 function RB:RestoreBagButtonOverrides()
-    if not self.bagButtons then
-        return
-    end
-
-    for _, button in ipairs(self.bagButtons) do
-        if button and button.__RBOverridden then
-            button:SetScript("OnClick", button.__RBOriginalOnClick)
-            button.__RBOriginalOnClick = nil
-            button.__RBOverridden = nil
-        end
-    end
-
-    wipeTable(self.bagButtons)
 end
 
 function RB:InstallBagHook()
@@ -2217,12 +2413,9 @@ function RB:InstallBagHook()
     end
 
     self.bagHookInstalled = true
-
-    if type(ContainerFrame_Update) == "function" then
-        hooksecurefunc("ContainerFrame_Update", function()
-            if RB:IsShown() then
-                RB:ApplyBagButtonOverrides()
-            end
+    if type(ContainerFrameItemButton_OnDrag) == "function" then
+        hooksecurefunc("ContainerFrameItemButton_OnDrag", function(button)
+            RB:TrackBagItemDrag(button)
         end)
     end
 end
